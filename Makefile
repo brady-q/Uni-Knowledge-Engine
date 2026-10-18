@@ -6,9 +6,18 @@ BACKEND := backend
 VENV    := $(BACKEND)/.venv
 PY312   := /usr/bin/python3.12
 
+# Files a container generates into the bind mount must belong to the person who
+# ran make, not to the image's non-root uid, or the migration alembic just
+# wrote is uneditable on the host.
+HOST_USER := $(shell id -u):$(shell id -g)
+
+# Host-side tooling reaches Postgres on the published port, not by service name.
+LOCAL_DB := postgresql+asyncpg://$${POSTGRES_USER:-uke}:$${POSTGRES_PASSWORD:-uke_dev_password}@localhost:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB:-uke}
+
 .DEFAULT_GOAL := help
-.PHONY: help env up down restart build logs ps sh psql migrate revision test test-local \
-        lint fmt typecheck check web-typecheck web-build venv reset
+
+.PHONY: help env up down restart build logs ps sh psql migrate migrate-local revision \
+        downgrade test test-local lint fmt typecheck check web-typecheck web-build venv reset
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -47,9 +56,18 @@ psql: ## Open psql against the running database
 migrate: env ## Apply all migrations
 	$(COMPOSE) run --rm api alembic upgrade head
 
+migrate-local: ## Apply all migrations from the host venv against localhost
+	cd $(BACKEND) && DATABASE_URL="$(LOCAL_DB)" .venv/bin/alembic upgrade head
+
 revision: env ## Autogenerate a migration: make revision MSG="add courses"
 	@test -n "$(MSG)" || { echo 'MSG is required, e.g. make revision MSG="add courses"'; exit 1; }
-	$(COMPOSE) run --rm api alembic revision --autogenerate -m "$(MSG)"
+	$(COMPOSE) run --rm --user $(HOST_USER) api alembic revision --autogenerate -m "$(MSG)"
+	@echo
+	@echo "Read the generated file before applying it. Autogenerate does not detect"
+	@echo "renames (it emits a drop plus an add), CREATE EXTENSION, or data migrations."
+
+downgrade: env ## Roll back one revision: make downgrade [REV=-1]
+	$(COMPOSE) run --rm api alembic downgrade $(or $(REV),-1)
 
 test: env ## Run the backend suite in the container (integration tests included)
 	$(COMPOSE) run --rm api pytest
@@ -80,7 +98,7 @@ venv: ## Create backend/.venv from python3.12 and install dev deps
 	@echo "activate with: source $(VENV)/bin/activate"
 
 test-local: ## Run the suite from the host venv against localhost Postgres
-	cd $(BACKEND) && TEST_DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER:-uke}:$${POSTGRES_PASSWORD:-uke_dev_password}@localhost:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB:-uke}" .venv/bin/pytest
+	cd $(BACKEND) && TEST_DATABASE_URL="$(LOCAL_DB)" .venv/bin/pytest
 
 reset: ## DESTRUCTIVE: stop everything and delete the database and storage volumes
 	@echo "This deletes the uni-knowledge-engine db_data and api_storage volumes."

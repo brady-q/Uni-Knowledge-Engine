@@ -23,3 +23,37 @@ export interface ReadinessResponse {
   status: HealthStatus;
   checks: Record<string, ComponentStatus>;
 }
+
+/** Mirrors app/schemas.py CourseRead. */
+export interface Course {
+  id: string;
+  code: string;
+  title: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CourseCreate {
+  code: string;
+  title: string;
+  description?: string | null;
+}
+
+/**
+ * PATCH body. Every field is optional, and the distinction matters: omitting a
+ * key leaves the column alone, while sending `description: null` clears it.
+ */
+export interface CourseUpdate {
+  code?: string;
+  title?: string;
+  description?: string | null;
+}
+
+export interface CoursePage {
+  items: Course[];
+  /** Total matching rows, not the length of `items`. */
+  total: number;
+  limit: number;
+  offset: number;
+}

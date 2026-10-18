@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from fastapi import Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -38,3 +39,17 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     async with sessionmaker() as session:
         yield session
+
+
+def violated_constraint(error: IntegrityError) -> str | None:
+    """Name the constraint Postgres rejected a statement on, if it said.
+
+    asyncpg records the constraint on the driver exception, which SQLAlchemy
+    then wraps twice: ``error.orig`` is the DBAPI shim and its ``__cause__`` is
+    the asyncpg error carrying ``constraint_name``. Matching on that name
+    rather than on the message text keeps the mapping exact - a table with two
+    unique constraints must not report either violation as the other.
+    """
+    cause = getattr(error.orig, "__cause__", None)
+    name = getattr(cause, "constraint_name", None)
+    return name if isinstance(name, str) else None

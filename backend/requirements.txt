@@ -6,4 +6,7 @@ pydantic==2.13.5
 pydantic-settings==2.15.0
 sqlalchemy[asyncio]==2.0.52
 asyncpg==0.31.0
+# Postgres vector type for SQLAlchemy and Alembic. The extension itself ships
+# in the pgvector/pgvector image; this is only the client-side type.
+pgvector==0.5.0
 alembic==1.19.2

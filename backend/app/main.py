@@ -13,17 +13,46 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.config import Settings, get_settings
 from app.db import create_engine, create_sessionmaker
-from app.routers import health
+from app.errors import ConflictError, DomainError, NotFoundError
+from app.routers import courses, health
 
 logger = logging.getLogger(__name__)
 
 API_V1_PREFIX = "/api/v1"
+
+
+def _domain_error_response(status_code: int, exc: Exception) -> JSONResponse:
+    # Starlette types handlers as taking a bare Exception, hence the narrowing.
+    detail = exc.detail if isinstance(exc, DomainError) else str(exc)
+    # Same {"detail": ...} shape FastAPI uses for its own errors, so a client
+    # needs one code path for failures regardless of where they came from.
+    return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+def _register_domain_errors(app: FastAPI) -> None:
+    """Map domain errors onto status codes, once, for every route.
+
+    This is why no route handler contains a try/except: a service raising
+    NotFoundError from any depth becomes a 404. Subclasses dispatch to their
+    nearest registered ancestor, so new error types get the right status for
+    free.
+    """
+
+    async def not_found(request: Request, exc: Exception) -> JSONResponse:
+        return _domain_error_response(status.HTTP_404_NOT_FOUND, exc)
+
+    async def conflict(request: Request, exc: Exception) -> JSONResponse:
+        return _domain_error_response(status.HTTP_409_CONFLICT, exc)
+
+    app.add_exception_handler(NotFoundError, not_found)
+    app.add_exception_handler(ConflictError, conflict)
 
 
 def _configure_logging(level: str) -> None:
@@ -82,8 +111,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_headers=["*"],
         )
 
+    _register_domain_errors(app)
+
     # Health is intentionally unversioned: probes should not have to track the
-    # API version. Feature routers mount under API_V1_PREFIX as they are added.
+    # API version. Feature routers mount under API_V1_PREFIX.
     app.include_router(health.router)
+    app.include_router(courses.router, prefix=API_V1_PREFIX)
 
     return app

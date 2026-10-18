@@ -8,45 +8,26 @@ green on a laptop with Docker stopped.
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
 
 from app.config import Settings
-from app.db import create_engine
 from app.main import create_app
 
 pytestmark = pytest.mark.integration
 
-DEFAULT_URL = "postgresql+asyncpg://uke:uke_dev_password@localhost:5432/uke"
-
-
-def database_url() -> str:
-    # In the api container DATABASE_URL already points at the db service;
-    # host-side runs set TEST_DATABASE_URL to a localhost DSN.
-    return os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL") or DEFAULT_URL
-
 
 @pytest.fixture
-async def live_settings(tmp_path: Path) -> Settings:
-    url = database_url()
-    engine = create_engine(url)
-    try:
-        async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001 - any failure means "no database here"
-        pytest.skip(f"no database at {url}: {type(exc).__name__}")
-    finally:
-        await engine.dispose()
-
+def live_settings(dev_database_url: str, tmp_path: Path) -> Settings:
+    """Points at the development database, not the isolated test one: these
+    tests exist to prove the database we actually ship has what we need."""
     return Settings(
         environment="test",
         log_level="WARNING",
-        database_url=url,
+        database_url=dev_database_url,
         storage_dir=tmp_path / "storage",
     )
 
