@@ -1,0 +1,91 @@
+name: uni-knowledge-engine
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-uke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uke_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-uke}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      # api waits on this, so it never boots against a Postgres that is still
+      # running its initdb scripts.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-uke} -d ${POSTGRES_DB:-uke}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: ./backend
+      args:
+        INSTALL_DEV: "true"
+    env_file: .env
+    environment:
+      # Explicit override so a .env written for host-side tooling cannot point
+      # the container at a localhost that has no Postgres.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-uke}:${POSTGRES_PASSWORD:-uke_dev_password}@db:5432/${POSTGRES_DB:-uke}
+      STORAGE_DIR: /data/storage
+      # The container runs as non-root against a host-owned bind mount, so
+      # tool caches cannot be written next to the source.
+      RUFF_CACHE_DIR: /tmp/.ruff_cache
+      MYPY_CACHE_DIR: /tmp/.mypy_cache
+      PYTEST_ADDOPTS: -o cache_dir=/tmp/.pytest_cache
+    ports:
+      - "8000:8000"
+    volumes:
+      # Source is bind-mounted for --reload; storage is a named volume so
+      # uploaded PDFs survive a rebuild.
+      - ./backend:/app
+      - api_storage:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - uvicorn
+      - app.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    healthcheck:
+      # Liveness only, and no curl in the slim image, so use stdlib urllib.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  web:
+    build: ./frontend
+    environment:
+      # No ANTHROPIC_API_KEY here, by design.
+      API_BASE_URL: http://api:8000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      # Anonymous volume keeps the image's node_modules from being shadowed by
+      # the host bind mount.
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api
+    command: ["npm", "run", "dev"]
+
+volumes:
+  db_data:
+  api_storage:
