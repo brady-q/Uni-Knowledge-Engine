@@ -1,10 +1,20 @@
 # Uni Knowledge Engine
 
-Question answering over university course PDFs, with every claim cited to a
-specific document and page.
+A study assistant that answers questions from a course's own material, and
+shows exactly where each answer came from.
 
-Upload a PDF to a course, ask a question, and click any `[S1]` marker in the
-answer to open the cited page beside it.
+Students upload lecture notes, slides, handbooks and past papers as PDFs to a
+course. The engine extracts the text page by page, splits it into chunks, and
+indexes them for semantic search. When someone asks a question, such as "When
+is the second assignment due?" or "How is the learning rate chosen?", it
+retrieves the most relevant passages and has Claude write an answer grounded
+only in them.
+
+Every claim in the answer carries a citation like `[S1]`. Clicking it opens the
+original PDF at the cited page, so the answer can be checked against the
+source. If the course material doesn't cover the question, the engine says so
+instead of guessing. Every question and answer is logged, so gaps in the
+material are easy to spot.
 
 ## How citations stay honest
 
@@ -68,9 +78,3 @@ make test-live   # calls the real Claude API (costs money)
 
 Unit tests need no database. Integration tests run real migrations against
 Postgres + pgvector. The default suite uses fake embeddings and a fake model.
-
-## Roadmap
-
-- [x] M1–M5: scaffolding, schema, ingestion, embeddings and search, cited answers
-- [x] M6: web UI with PDF pane
-- [ ] M7: eval harness (recall@k, citation precision)
