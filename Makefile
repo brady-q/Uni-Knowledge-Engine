@@ -17,7 +17,8 @@ LOCAL_DB := postgresql+asyncpg://$${POSTGRES_USER:-uke}:$${POSTGRES_PASSWORD:-uk
 .DEFAULT_GOAL := help
 
 .PHONY: help env up down restart build logs ps sh psql migrate migrate-local revision \
-        downgrade test test-local lint fmt typecheck check web-typecheck web-build venv reset
+        downgrade test test-slow test-live test-local lint fmt typecheck check web-typecheck web-build \
+        venv reset
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -72,6 +73,12 @@ downgrade: env ## Roll back one revision: make downgrade [REV=-1]
 test: env ## Run the backend suite in the container (integration tests included)
 	$(COMPOSE) run --rm api pytest
 
+test-slow: env ## Run the tests that load the real embedding model
+	$(COMPOSE) run --rm api pytest -m slow
+
+test-live: env ## Run the tests that call the real Claude API (spends money; needs ANTHROPIC_API_KEY)
+	$(COMPOSE) run --rm api pytest -m live
+
 lint: env ## ruff check + mypy
 	$(COMPOSE) run --rm api sh -c "ruff check . && mypy app tests"
 
@@ -100,7 +107,8 @@ venv: ## Create backend/.venv from python3.12 and install dev deps
 test-local: ## Run the suite from the host venv against localhost Postgres
 	cd $(BACKEND) && TEST_DATABASE_URL="$(LOCAL_DB)" .venv/bin/pytest
 
-reset: ## DESTRUCTIVE: stop everything and delete the database and storage volumes
-	@echo "This deletes the uni-knowledge-engine db_data and api_storage volumes."
+reset: ## DESTRUCTIVE: stop everything and delete the database, storage and model volumes
+	@echo "This deletes the uni-knowledge-engine db_data, api_storage and hf_cache volumes."
+	@echo "The next start re-downloads the embedding model."
 	@read -p "Type 'yes' to continue: " ans && [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
 	$(COMPOSE) down -v

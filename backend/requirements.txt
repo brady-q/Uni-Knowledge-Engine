@@ -10,3 +10,21 @@ asyncpg==0.31.0
 # in the pgvector/pgvector image; this is only the client-side type.
 pgvector==0.5.0
 alembic==1.19.2
+# Multipart form parsing. FastAPI does not depend on it; UploadFile parameters
+# raise at import time without it installed.
+python-multipart==0.0.32
+# PDF text extraction with per-page geometry. Ships manylinux wheels, so no
+# system MuPDF is needed in the image.
+pymupdf==1.28.2
+# Answer generation. Server-side only; the key never leaves the api container.
+anthropic==1.4.0
+# Already present transitively via starlette, pinned explicitly because the
+# ingestion path imports it directly to move blocking work off the event loop.
+anyio==4.15.0
+# Embeddings. torch is pinned to the CPU build from PyTorch's own index: the
+# default PyPI wheel drags in ~2.5 GB of CUDA libraries that nothing here can
+# use, and the image has no GPU. sentence-transformers brings transformers,
+# tokenizers and huggingface-hub with it.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
+sentence-transformers==6.0.1

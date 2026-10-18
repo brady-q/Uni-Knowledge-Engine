@@ -35,10 +35,24 @@ exclude = ["migrations/versions/"]
 module = ["tests.*"]
 disallow_untyped_decorators = false
 
+# PyMuPDF ships py.typed but leaves its own functions unannotated, so under
+# --strict every call into it is a "call to untyped function" and iterating a
+# Document is read as yielding Never. Skipping the import makes the library Any
+# at the boundary, which is the honest description: the types in
+# app/services/extraction.py are ours, not theirs, and that module converts
+# everything into typed dataclasses before it returns.
+[[tool.mypy.overrides]]
+module = ["pymupdf", "pymupdf.*"]
+follow_imports = "skip"
+follow_untyped_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-q --strict-markers --strict-config"
+# The marker filter is part of the default run, not something a contributor has
+# to remember: a suite that downloads models and spends money on API calls is a
+# suite people stop running. `make test-slow` opts back in.
+addopts = "-q --strict-markers --strict-config -m 'not slow and not live'"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [

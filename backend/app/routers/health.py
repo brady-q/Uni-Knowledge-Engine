@@ -14,8 +14,16 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
+from app.embedding import Embedder, get_embedder
+from app.llm import AnswerModel, get_answer_model
 from app.schemas import ComponentStatus, LivenessResponse, ReadinessResponse
-from app.services.health import ReadinessReport, check_database, check_pgvector
+from app.services.health import (
+    ReadinessReport,
+    check_answer_model,
+    check_database,
+    check_embedder,
+    check_pgvector,
+)
 
 router = APIRouter(tags=["health"])
 
@@ -30,17 +38,21 @@ async def liveness(request: Request) -> LivenessResponse:
 
 async def get_readiness_report(
     session: Annotated[AsyncSession, Depends(get_session)],
+    embedder: Annotated[Embedder, Depends(get_embedder)],
+    answer_model: Annotated[AnswerModel, Depends(get_answer_model)],
 ) -> ReadinessReport:
     """Run every dependency probe.
 
     Exposed as a dependency so tests can inject a healthy or failing report
-    without a database, and so later checks (an ``embedder`` entry once the
-    model is loaded at startup) are added in exactly one place.
+    without a database and without a model, and so a new check is added in
+    exactly one place.
     """
     return ReadinessReport(
         checks={
             "db": await check_database(session),
             "pgvector": await check_pgvector(session),
+            "embedder": check_embedder(embedder),
+            "claude": check_answer_model(answer_model),
         }
     )
 

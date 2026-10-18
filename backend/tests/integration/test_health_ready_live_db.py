@@ -15,7 +15,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings
+from app.embedding import get_embedder
+from app.llm import get_answer_model
 from app.main import create_app
+from tests.answers import FakeAnswerModel
+from tests.embeddings import FakeEmbedder
 
 pytestmark = pytest.mark.integration
 
@@ -34,7 +38,16 @@ def live_settings(dev_database_url: str, tmp_path: Path) -> Settings:
 
 @pytest.fixture
 async def live_client(live_settings: Settings) -> AsyncIterator[AsyncClient]:
+    """Real database, fake models.
+
+    The point of these tests is what the shipped Postgres image provides, and
+    the readiness report is only "ok" if *every* check is - so without
+    substitutes, the aggregate assertion below would be measuring a 90 MB
+    download and the presence of somebody's API key rather than the database.
+    """
     app = create_app(live_settings)
+    app.dependency_overrides[get_embedder] = lambda: FakeEmbedder()
+    app.dependency_overrides[get_answer_model] = lambda: FakeAnswerModel()
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -48,6 +61,8 @@ async def test_readiness_is_ok_against_the_real_database(live_client: AsyncClien
     body = response.json()
     assert body["status"] == "ok"
     assert body["checks"]["db"]["status"] == "ok"
+    # Every check has to be present for the aggregate to mean anything.
+    assert set(body["checks"]) == {"db", "pgvector", "embedder", "claude"}
 
 
 async def test_pgvector_is_present_on_the_shipped_image(live_client: AsyncClient) -> None:

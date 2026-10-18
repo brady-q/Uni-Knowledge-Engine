@@ -25,6 +25,7 @@ from app.schemas import (
     CourseUpdate,
 )
 from app.services.courses import CourseService
+from app.storage import DocumentStorage, get_storage
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -42,8 +43,9 @@ CONFLICT_RESPONSE: OpenApiResponses = {
 
 def get_course_service(
     session: Annotated[AsyncSession, Depends(get_session)],
+    storage: Annotated[DocumentStorage, Depends(get_storage)],
 ) -> CourseService:
-    return CourseService(session)
+    return CourseService(session, storage)
 
 
 ServiceDep = Annotated[CourseService, Depends(get_course_service)]
@@ -108,5 +110,5 @@ async def update_course(
     responses=NOT_FOUND_RESPONSE,
 )
 async def delete_course(course_id: CourseId, service: ServiceDep) -> None:
-    """Deleting a course also deletes its documents and chunks."""
+    """Deleting a course also deletes its documents, chunks and stored PDFs."""
     await service.delete(course_id)

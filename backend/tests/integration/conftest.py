@@ -12,6 +12,15 @@ running loop, and running the real command means the suite proves the
 
 Everything here skips rather than fails when no server is reachable, so
 `pytest` stays green on a laptop with Docker stopped.
+
+What these tests do *not* use for real is either model. Vectors come from
+``tests.embeddings.FakeEmbedder``, which is a real 384-dimension normalised
+vector per text and therefore exercises pgvector, the HNSW opclass and the
+retrieval SQL exactly as the model would - without a download, and with a
+ranking the test can predict. Answers come from ``tests.answers``, which lets a
+test choose the markers the model writes and therefore assert on what happens
+to an invented one. What only the real models can do is matched in
+``tests/slow``.
 """
 
 from __future__ import annotations
@@ -32,7 +41,11 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.db import create_engine, create_sessionmaker
+from app.embedding import get_embedder
+from app.llm import get_answer_model
 from app.main import create_app
+from tests.answers import FakeAnswerModel
+from tests.embeddings import FakeEmbedder
 
 type AlembicRunner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -43,7 +56,7 @@ DEFAULT_URL = "postgresql+asyncpg://uke:uke_dev_password@localhost:5432/uke"
 
 # Truncated between tests. Listed explicitly, in dependency order, so a CASCADE
 # can never quietly reach a table this file does not know about.
-MANAGED_TABLES = ("chunks", "documents", "courses")
+MANAGED_TABLES = ("citations", "questions", "chunks", "documents", "courses")
 
 
 def _configured_url() -> str:
@@ -190,11 +203,40 @@ def isolated_settings(isolated_database_url: str, tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
+def embedder() -> FakeEmbedder:
+    """The fake the app is wired to, exposed so a test can assert on its calls."""
+    return FakeEmbedder()
+
+
+@pytest.fixture
+def answer_model() -> FakeAnswerModel:
+    """The same trade as ``embedder``, for the half of the pipeline that bills.
+
+    Exposed so a test can set the markers the "model" writes, which is how the
+    interesting cases - an invented citation, an abstention - are provoked
+    deterministically rather than hoped for.
+    """
+    return FakeAnswerModel()
+
+
+@pytest.fixture
 async def api_client(
-    isolated_settings: Settings, clean_database: None
+    isolated_settings: Settings,
+    clean_database: None,
+    embedder: FakeEmbedder,
+    answer_model: FakeAnswerModel,
 ) -> AsyncIterator[AsyncClient]:
-    """The real app, real sessions, real Postgres. No dependency overrides."""
+    """The real app, real sessions, real Postgres, real migrations.
+
+    The two models are the only overrides. The embedder covers retrieval *and*
+    ingestion, because the pipeline receives whatever ``get_embedder`` resolved
+    rather than reading the model off ``app.state`` itself - which is exactly
+    why that dependency exists. The answer model is overridden for a blunter
+    reason: everything below this line is free to run, and a real one is not.
+    """
     app = create_app(isolated_settings)
+    app.dependency_overrides[get_embedder] = lambda: embedder
+    app.dependency_overrides[get_answer_model] = lambda: answer_model
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

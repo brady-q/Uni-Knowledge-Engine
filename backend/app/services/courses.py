@@ -21,13 +21,17 @@ from app.db import violated_constraint
 from app.errors import ConflictError, NotFoundError
 from app.models import COURSE_CODE_UNIQUE, Course
 from app.repositories.courses import CourseRepository
+from app.repositories.documents import DocumentRepository
 from app.schemas import CourseCreate, CourseUpdate
+from app.storage import DocumentStorage
 
 
 class CourseService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, storage: DocumentStorage) -> None:
         self._session = session
+        self._storage = storage
         self._courses = CourseRepository(session)
+        self._documents = DocumentRepository(session)
 
     async def create(self, payload: CourseCreate) -> Course:
         course = Course(
@@ -56,9 +60,23 @@ class CourseService:
         return await self._commit(course)
 
     async def delete(self, course_id: uuid.UUID) -> None:
+        """Delete a course, its documents, its chunks and their stored files.
+
+        The rows go by ON DELETE CASCADE, but nothing cascades to the
+        filesystem, so the document ids have to be read *before* the delete -
+        afterwards there is no record of which files to remove, and every PDF
+        ever uploaded to the course leaks.
+
+        Bytes go last, for the same reason as in DocumentService: an orphaned
+        file wastes disk, while a live row whose file is gone is a citation
+        that can never be resolved.
+        """
         course = await self.get(course_id)
+        document_ids = await self._documents.list_ids_for_course(course_id)
         await self._courses.delete(course)
         await self._session.commit()
+        for document_id in document_ids:
+            self._storage.delete(document_id)
 
     async def _commit(self, course: Course) -> Course:
         """Commit, translating the one constraint a client can trip into 409.

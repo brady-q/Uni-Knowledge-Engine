@@ -18,6 +18,7 @@ from enum import StrEnum
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -50,9 +51,15 @@ NAMING_CONVENTION = {
     "pk": "pk_%(table_name)s",
 }
 
-# Referenced by the service that turns a duplicate insert into a 409, so the
-# error mapping breaks loudly here if the constraint is ever renamed.
+# Referenced by the services that turn a rejected insert into a 4xx, so the
+# error mapping breaks loudly here if a constraint is ever renamed. They are
+# spelled out rather than derived from NAMING_CONVENTION because the whole
+# point is to fail visibly when the generated name changes.
 COURSE_CODE_UNIQUE = "uq_courses_code"
+DOCUMENT_CONTENT_HASH_UNIQUE = "uq_documents_course_id_content_hash"
+DOCUMENT_COURSE_FOREIGN_KEY = "fk_documents_course_id_courses"
+QUESTION_COURSE_FOREIGN_KEY = "fk_questions_course_id_courses"
+CITATION_CHUNK_FOREIGN_KEY = "fk_citations_chunk_id_chunks"
 
 
 class Base(DeclarativeBase):
@@ -239,11 +246,130 @@ class Chunk(UuidPrimaryKey, Base):
     page_start: Mapped[int] = mapped_column(Integer, nullable=False)
     page_end: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    # Nullable because chunks are written during extraction and embedded in a
-    # later pass: a chunk without a vector is a valid intermediate state, not
-    # corruption. Retrieval filters these out.
+    # Nullable, even though ingestion now writes the vector with the row.
+    # Embedding is a separate concern from the text: a chunk that exists
+    # without one - written before the embedding stage existed, or waiting on a
+    # re-embed after a model change - is a valid state rather than corruption,
+    # and NOT NULL here would make changing models a data migration with no
+    # intermediate step. Retrieval filters these out.
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBEDDING_DIMENSIONS), nullable=True
     )
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class Question(UuidPrimaryKey, Base):
+    """One question asked of a course, the answer it got, and how it was produced.
+
+    This is the query log. It exists for three jobs that all need the same row:
+    showing a user what they have already asked, letting whoever runs this see
+    what the corpus fails to cover, and giving the eval harness in ``M7`` a
+    corpus of real questions with real citations to score.
+
+    No ``updated_at``: a log row is written once and never edited. An
+    ``updated_at`` on an append-only table is a column that can only ever lie
+    about what happened.
+
+    ``model`` is nullable because not every question reaches a model. When
+    retrieval finds nothing there is nothing to cite and no prompt worth
+    sending, so the answer is written without an API call - and a NULL here is
+    what distinguishes that from a call that happened.
+    """
+
+    __tablename__ = "questions"
+    __table_args__ = (
+        # "the most recent questions in this course", which is the only way
+        # this table is ever read. Ascending rather than descending because
+        # Postgres scans a btree backwards just as cheaply, and this also
+        # supplies the index the course foreign key does not get for free.
+        Index("ix_questions_course_id_created_at", "course_id", "created_at"),
+        CheckConstraint("retrieved >= 0", name="retrieved_non_negative"),
+        CheckConstraint("dropped_markers >= 0", name="dropped_markers_non_negative"),
+        CheckConstraint("latency_ms >= 0", name="latency_ms_non_negative"),
+        CheckConstraint("input_tokens IS NULL OR input_tokens >= 0", name="input_tokens_valid"),
+        CheckConstraint("output_tokens IS NULL OR output_tokens >= 0", name="output_tokens_valid"),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    # False when the retrieved passages did not support an answer. Enforced by
+    # the answer service to imply at least one citation, which is a rule about
+    # two tables and therefore cannot be a CHECK constraint here.
+    answered: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # How many passages went into the prompt. Zero means retrieval came back
+    # empty, which is the one case where no model was called.
+    retrieved: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Markers the model emitted that named no retrieved passage, and were
+    # therefore deleted from the answer. Recorded rather than merely logged
+    # because "how often does the model invent a citation?" is the central
+    # question about this system, and a number in a column can be queried.
+    dropped_markers: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Wall clock for the whole answer: retrieval, generation and resolution.
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), sort_order=100
+    )
+
+    citations: Mapped[list[Citation]] = relationship(
+        back_populates="question",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        # Marker order, so a rendered answer's footnotes are numbered the same
+        # way every time it is read back.
+        order_by="Citation.marker",
+    )
+
+
+class Citation(UuidPrimaryKey, Base):
+    """A resolved ``[S#]`` marker: which passage the model was pointing at.
+
+    This table is the citation guarantee written down. It stores the marker and
+    a foreign key to the chunk, and deliberately stores *no* copy of the
+    filename or page range - those are read back through ``chunk.document``
+    every time a citation is rendered, so a citation cannot drift from the
+    document it claims to come from.
+
+    The consequence is that deleting or re-ingesting a document removes the
+    citations that pointed into it, via ON DELETE CASCADE. That is the intended
+    behaviour rather than a limitation: a marker resolving to a chunk that no
+    longer exists is exactly the unresolvable citation this schema is built to
+    make impossible.
+    """
+
+    __tablename__ = "citations"
+    __table_args__ = (
+        # One row per marker per question; resolution collapses a marker the
+        # model used twice into a single citation. question_id leads, so
+        # "the citations for this question" is covered by the same index.
+        UniqueConstraint("question_id", "marker"),
+        # 1-based, matching the [S1] the model was shown.
+        CheckConstraint("marker >= 1", name="marker_positive"),
+    )
+
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        # Indexed because this is the side the cascade is driven from:
+        # re-ingesting a document deletes every one of its chunks, and each of
+        # those deletes has to find the citations referencing it.
+        ForeignKey("chunks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    marker: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    question: Mapped[Question] = relationship(back_populates="citations")
+    # One-directional: nothing needs to ask a chunk which answers cited it, and
+    # the reverse collection would be unbounded.
+    chunk: Mapped[Chunk] = relationship()

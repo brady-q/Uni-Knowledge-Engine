@@ -43,6 +43,8 @@ services:
       # uploaded PDFs survive a rebuild.
       - ./backend:/app
       - api_storage:/data/storage
+      # The embedding model's weights, so a rebuild does not re-download them.
+      - hf_cache:/home/appuser/.cache/huggingface
     depends_on:
       db:
         condition: service_healthy
@@ -65,6 +67,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+      # Liveness does not wait for the model, so this only has to cover
+      # interpreter startup. Model readiness is /health/ready's business.
       start_period: 15s
 
   web:
@@ -89,3 +93,4 @@ services:
 volumes:
   db_data:
   api_storage:
+  hf_cache:
